@@ -142,6 +142,15 @@ namespace beckhoff_ads_hardware_interface
     /// reset or replaced. Idempotent: safe when the layouts are already empty.
     void release_ads_handles();
 
+    /// Command interface name -> the value to drive onto the PLC when the component deactivates.
+    ///
+    /// Declared per command interface as <param name="shutdown_value">, mirroring initial_value.
+    /// Exists because teardown otherwise only ever ZEROES outputs, which is right for a signal
+    /// that must fall and wrong for one that must RISE on the way out -- a graceful-stop request
+    /// being the motivating case. Interfaces that declare nothing are untouched and keep the
+    /// existing last-command/fallback behaviour.
+    std::map<std::string, double> ads_shutdown_values_;
+
     // Metadata (populated in on interface export)
     // Describes each variable on the PLC
     std::vector<ADSDataLayout> ads_item_layouts_read_;
