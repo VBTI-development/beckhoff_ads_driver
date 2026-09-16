@@ -134,6 +134,14 @@ namespace beckhoff_ads_hardware_interface
     std::unique_ptr<AdsDevice> ads_device_; // Manages the route/connection to the PLC
     bool configure_ads_device();
 
+    /// Release every ADS symbol handle, while the AdsDevice that issued them is still alive.
+    ///
+    /// Each AdsHandle is a unique_ptr whose ResourceDeleter holds a std::function bound to the
+    /// AdsDevice (ads/AdsDevice.h), so releasing one after its device has been destroyed calls
+    /// DeleteSymbolHandle through a dangling object. Must therefore run BEFORE ads_device_ is
+    /// reset or replaced. Idempotent: safe when the layouts are already empty.
+    void release_ads_handles();
+
     // Metadata (populated in on interface export)
     // Describes each variable on the PLC
     std::vector<ADSDataLayout> ads_item_layouts_read_;

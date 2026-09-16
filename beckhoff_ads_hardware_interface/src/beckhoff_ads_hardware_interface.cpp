@@ -37,6 +37,12 @@ namespace beckhoff_ads_hardware_interface
     hardware_interface::CallbackReturn BeckhoffADSHardwareInterface::on_configure(
         const rclcpp_lifecycle::State & /*previous_state*/)
     {
+        // Before anything else: configure_ads_device() below REPLACES ads_device_, which destroys
+        // the previous one. A handle left over from an earlier configure would then be released
+        // against a freed device -- the same fault as on_shutdown. The layout vectors are cleared
+        // again further down as part of building them; this is about WHEN, not whether.
+        release_ads_handles();
+
         // Configure ADS Client Device
         if (!configure_ads_device())
         {
@@ -707,6 +713,11 @@ namespace beckhoff_ads_hardware_interface
         const rclcpp_lifecycle::State & /*previous_state*/)
     {
         RCLCPP_INFO(getLogger(), "Releasing ADS resources...");
+        // Handles first, device second. The other order leaves every optional<AdsHandle> in the
+        // layout vectors holding a deleter bound to a freed AdsDevice; they then run at component
+        // destruction, inside ~ResourceManager, and segfault in DeleteSymbolHandle -> WriteReqEx
+        // -> GetLocalPort() on a dangling this.
+        release_ads_handles();
         if (ads_device_)
         {
             ads_device_.reset();
@@ -714,6 +725,14 @@ namespace beckhoff_ads_hardware_interface
         RCLCPP_INFO(getLogger(), "ADS resources released.");
 
         return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
+    void BeckhoffADSHardwareInterface::release_ads_handles()
+    {
+        // Clearing the layouts is what actually frees the handles: destroying each
+        // optional<AdsHandle> runs the deleter that issues DeleteSymbolHandle on the PLC.
+        ads_item_layouts_read_.clear();
+        ads_item_layouts_write_.clear();
     }
 
     bool BeckhoffADSHardwareInterface::configure_ads_device()
