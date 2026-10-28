@@ -17,6 +17,7 @@ add_library(
   beckhoff_ads_hardware_interface
   SHARED
   src/beckhoff_ads_hardware_interface.cpp
+  src/ads_layout.cpp
 )
 
 target_include_directories(
@@ -50,6 +51,12 @@ install(
   DIRECTORY include/
   DESTINATION include
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_ads_layout test/test_ads_layout.cpp)
+  target_link_libraries(test_ads_layout beckhoff_ads_hardware_interface)
+endif()
 
 ament_export_include_directories(
   include
