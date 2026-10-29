@@ -53,6 +53,8 @@ namespace beckhoff_ads_hardware_interface
         std::optional<size_t> index;        // array element; defaults to 0
         std::optional<size_t> byte_offset;  // struct member: offset inside the symbol, in bytes
         bool auto_increment = false;        // command only: the component counts it up every write
+        bool pulse_on_rising_edge =
+            false;  // command only, BOOL: 1 for one write per 0 -> 1 command
     };
 
     /// Where one interface's value sits inside its item.
@@ -62,6 +64,7 @@ namespace beckhoff_ads_hardware_interface
         size_t byte_offset = 0;
         PLCType plc_type = PLCType::UNKNOWN;
         bool auto_increment = false;
+        bool pulse_on_rising_edge = false;
     };
 
     /// One ADS item: one PLC symbol, read or written as one block in the sum command, so a PLC
@@ -87,6 +90,12 @@ namespace beckhoff_ads_hardware_interface
     /// The value an auto_increment member carries after `previous`: one more, wrapping to 0 past
     /// the type's maximum. NaN (nothing sent yet) counts as 0, so the first value written is 1.
     double next_counter_value(double previous, PLCType plc_type);
+
+    /// Whether `command` is a rising edge after `previous`: it is 1 (> 0.5) and `previous` was not.
+    /// NaN (nothing commanded) counts as 0. A pulse_on_rising_edge member writes 1 for the one
+    /// write in which this holds and 0 otherwise, so a held command -- the gpio controller keeps
+    /// writing the last one it got -- never keeps the PLC symbol at 1.
+    bool rising_edge(double previous, double command);
 
     /// Writes `value` into `destination` as the PLC type (integers rounded, BOOL is value != 0).
     /// False for a type that is not supported.

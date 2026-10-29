@@ -23,6 +23,7 @@ using beckhoff_ads_hardware_interface::InterfaceSpec;
 using beckhoff_ads_hardware_interface::ItemLayoutSpec;
 using beckhoff_ads_hardware_interface::next_counter_value;
 using beckhoff_ads_hardware_interface::PLCType;
+using beckhoff_ads_hardware_interface::rising_edge;
 
 namespace
 {
@@ -321,4 +322,55 @@ TEST(PlcValueCodec, UnsupportedTypesAreRefused)
     double decoded = 0.0;
     EXPECT_FALSE(encode_plc_value(PLCType::UNKNOWN, 1.0, buffer));
     EXPECT_FALSE(decode_plc_value(PLCType::STRING, buffer, decoded));
+}
+
+TEST(GroupItems, PulseOnRisingEdgeIsKeptOnTheMember)
+{
+    InterfaceSpec spec;
+    spec.name = "machine/alive";
+    spec.plc_symbol = "MAIN.Machine.Alive";
+    spec.plc_type = PLCType::BOOL;
+    spec.pulse_on_rising_edge = true;
+    std::vector<std::string> errors;
+
+    const auto items = group_items({spec}, errors);
+
+    EXPECT_TRUE(errors.empty());
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_TRUE(items[0].members[0].pulse_on_rising_edge);
+}
+
+TEST(GroupItems, PulseOnRisingEdgeNeedsABool)
+{
+    InterfaceSpec spec;
+    spec.name = "x";
+    spec.plc_symbol = "MAIN.X";
+    spec.plc_type = PLCType::UDINT;
+    spec.pulse_on_rising_edge = true;
+    std::vector<std::string> errors;
+
+    const auto items = group_items({spec}, errors);
+
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors[0].find("pulse_on_rising_edge"), std::string::npos);
+    EXPECT_TRUE(items.empty());
+}
+
+// A heartbeat a dead node cannot fake: the gpio controller keeps writing the last command it got,
+// so a level written as-is would stay 1 forever after its sender died. Only a 0 -> 1 change of the
+// command produces a 1 on the PLC, for one write.
+TEST(RisingEdge, OnlyATransitionToOneIsAnEdge)
+{
+    EXPECT_TRUE(rising_edge(0.0, 1.0));
+    EXPECT_FALSE(rising_edge(1.0, 1.0));
+    EXPECT_FALSE(rising_edge(1.0, 0.0));
+    EXPECT_FALSE(rising_edge(0.0, 0.0));
+}
+
+TEST(RisingEdge, NothingCommandedYetCountsAsZero)
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_TRUE(rising_edge(nan, 1.0));
+    EXPECT_FALSE(rising_edge(0.0, nan));
+    EXPECT_FALSE(rising_edge(nan, nan));
 }

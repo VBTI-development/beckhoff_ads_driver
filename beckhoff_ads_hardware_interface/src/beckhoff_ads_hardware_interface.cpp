@@ -229,6 +229,7 @@ namespace beckhoff_ads_hardware_interface
                 write_instruction.command_interface_name = member.interface_name;
                 write_instruction.fallback_state_interface_name = "";
                 write_instruction.auto_increment = member.auto_increment;
+                write_instruction.pulse_on_rising_edge = member.pulse_on_rising_edge;
 
                 // There exists a state interface for the same PLC value
                 const auto fallback =
@@ -297,31 +298,42 @@ namespace beckhoff_ads_hardware_interface
                              command ? "command" : "state", name.c_str(), e.what());
                 continue;
             }
-            if (parameters.count("auto_increment"))
+            // Command-only boolean flags.
+            bool valid = true;
+            for (const auto &[flag_name, field] :
+                 {std::pair<const char *, bool *>{"auto_increment", &spec.auto_increment},
+                  std::pair<const char *, bool *>{"pulse_on_rising_edge",
+                                                  &spec.pulse_on_rising_edge}})
             {
-                std::string flag = parameters.at("auto_increment");
+                if (!parameters.count(flag_name))
+                {
+                    continue;
+                }
+                std::string flag = parameters.at(flag_name);
                 std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
                 if (!command)
                 {
                     RCLCPP_WARN(getLogger(),
-                                "Ignoring 'auto_increment' on state interface '%s': only a command "
-                                "is written.",
-                                name.c_str());
+                                "Ignoring '%s' on state interface '%s': only a command is written.",
+                                flag_name, name.c_str());
                 }
                 else if (flag == "true" || flag == "1")
                 {
-                    spec.auto_increment = true;
+                    *field = true;
                 }
                 else if (flag != "false" && flag != "0")
                 {
                     RCLCPP_ERROR(getLogger(),
-                                 "Invalid 'auto_increment' ('%s') for command interface '%s'; "
-                                 "expected true or false. Skipping it.",
-                                 parameters.at("auto_increment").c_str(), name.c_str());
-                    continue;
+                                 "Invalid '%s' ('%s') for command interface '%s'; expected true or "
+                                 "false. Skipping it.",
+                                 flag_name, parameters.at(flag_name).c_str(), name.c_str());
+                    valid = false;
                 }
             }
-            specs.push_back(spec);
+            if (valid)
+            {
+                specs.push_back(spec);
+            }
         }
         return specs;
     }
@@ -541,6 +553,24 @@ namespace beckhoff_ads_hardware_interface
                 write_instruction.counter_value =
                     next_counter_value(write_instruction.counter_value, write_instruction.plc_type);
                 encode_plc_value(write_instruction.plc_type, write_instruction.counter_value,
+                                 ptr_write_buffer_destination_current);
+                continue;
+            }
+
+            if (write_instruction.pulse_on_rising_edge)
+            {
+                // Only a CHANGE of the command reaches the PLC as a 1, for this one write: a held
+                // command (the gpio controller rewrites its last one every cycle) is no proof that
+                // its sender is still alive, an edge is.
+                const double command = get_command(write_instruction.command_interface_name);
+                set_command(write_instruction.command_interface_name,
+                            std::numeric_limits<double>::quiet_NaN());
+                const bool pulse = rising_edge(write_instruction.last_command, command);
+                if (!std::isnan(command))
+                {
+                    write_instruction.last_command = command;
+                }
+                encode_plc_value(write_instruction.plc_type, pulse ? 1.0 : 0.0,
                                  ptr_write_buffer_destination_current);
                 continue;
             }

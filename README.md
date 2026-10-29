@@ -48,6 +48,7 @@ For each `<state_interface>` and `<command_interface>`, you must provide paramet
 | `byte_offset`   | `integer` | (Optional) The byte offset of this interface inside a PLC struct. See [Structs](#structs). Cannot be combined with `index` on the same `PLC_symbol`. |
 | `initial_value` | `double`  | (Optional, Command Only) The initial value for a command interface before the first command is received. |
 | `auto_increment`| `bool`    | (Optional, Command Only) The component writes a counter instead of the command: one more on every write, wrapping to 0 past the type's maximum, starting at 1. Needs an unsigned integer `PLC_type` (`USINT`, `BYTE`, `UINT`, `UDINT`). |
+| `pulse_on_rising_edge` | `bool` | (Optional, Command Only, `BOOL`) The PLC symbol is written 1 for the one write in which the command rises from 0 to 1, and 0 otherwise. A held command (a gpio controller rewrites its last command every cycle) never keeps the symbol at 1, so a heartbeat toggled by a node stops reaching the PLC when that node, the controller or this component stops. |
 
 ### Structs
 All interfaces that name the same `PLC_symbol` are read or written as **one item** of the ADS sum

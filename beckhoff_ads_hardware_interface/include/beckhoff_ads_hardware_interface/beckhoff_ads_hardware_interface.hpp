@@ -93,6 +93,10 @@ namespace beckhoff_ads_hardware_interface
     bool auto_increment = false;
     double counter_value =
         std::numeric_limits<double>::quiet_NaN();  // last value written; NaN before the first
+
+    // pulse_on_rising_edge: 1 for the one write in which the command rose 0 -> 1, else 0.
+    bool pulse_on_rising_edge = false;
+    double last_command = std::numeric_limits<double>::quiet_NaN();  // NaN before the first
   };
 
   class BeckhoffADSHardwareInterface : public hardware_interface::SystemInterface

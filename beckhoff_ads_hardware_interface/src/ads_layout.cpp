@@ -167,6 +167,14 @@ namespace beckhoff_ads_hardware_interface
                                  quoted(spec.plc_symbol) + ": unsupported or unknown PLC_type.");
                 continue;
             }
+            if (spec.pulse_on_rising_edge &&
+                (spec.plc_type != PLCType::BOOL || spec.auto_increment))
+            {
+                errors.push_back(
+                    "Interface " + quoted(spec.name) +
+                    ": pulse_on_rising_edge needs PLC_type BOOL and no auto_increment.");
+                continue;
+            }
             if (spec.auto_increment && !is_unsigned_integer(spec.plc_type))
             {
                 errors.push_back("Interface " + quoted(spec.name) +
@@ -203,6 +211,7 @@ namespace beckhoff_ads_hardware_interface
             member.byte_offset = offset;
             member.plc_type = spec.plc_type;
             member.auto_increment = spec.auto_increment;
+            member.pulse_on_rising_edge = spec.pulse_on_rising_edge;
             if (it == pending_items.end())
             {
                 fresh.item.members.push_back(member);
@@ -248,6 +257,13 @@ namespace beckhoff_ads_hardware_interface
         const uint64_t modulus = uint64_t{1} << (8 * plc_type_byte_size(plc_type));
         const uint64_t current = std::isnan(previous) ? 0 : static_cast<uint64_t>(previous);
         return static_cast<double>((current + 1) % modulus);
+    }
+
+    bool rising_edge(double previous, double command)
+    {
+        const bool was_high = !std::isnan(previous) && previous > 0.5;
+        const bool is_high = !std::isnan(command) && command > 0.5;
+        return is_high && !was_high;
     }
 
     namespace
