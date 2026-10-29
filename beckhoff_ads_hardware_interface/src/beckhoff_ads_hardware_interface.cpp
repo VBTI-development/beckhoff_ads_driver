@@ -100,13 +100,23 @@ namespace beckhoff_ads_hardware_interface
         {
             for (const auto &state_layout : ads_item_layouts_read_)
             {
-                if (command_layout.plc_name_symbolic == state_layout.plc_name_symbolic)
+                if (command_layout.plc_name_symbolic != state_layout.plc_name_symbolic)
                 {
-                    for (size_t k = 0; k < command_layout.num_elements; ++k)
+                    continue;
+                }
+                // A command member and a state member at the same place in the same symbol are the
+                // same PLC value
+                for (const auto &command_member : command_layout.members)
+                {
+                    for (const auto &state_member : state_layout.members)
                     {
-                        // The pair is made of (command_interface_name, corresponding_state_interface_name)
-                        auto pair = std::make_pair(command_layout.ros2_interfaces_.find(k)->second, state_layout.ros2_interfaces_.find(k)->second);
-                        command_layout.state_command_interfaces_map_.emplace(pair);
+                        if (command_member.byte_offset == state_member.byte_offset)
+                        {
+                            // The pair is made of (command_interface_name,
+                            // corresponding_state_interface_name)
+                            command_layout.state_command_interfaces_map_.emplace(
+                                command_member.interface_name, state_member.interface_name);
+                        }
                     }
                 }
             }
@@ -129,11 +139,12 @@ namespace beckhoff_ads_hardware_interface
         size_t total_data_block_size = 0;
         for (const auto &layout : ads_item_layouts_read_)
         {
-            total_data_block_size += layout.plc_element_byte_size * layout.num_elements;
+            total_data_block_size += layout.byte_size;
         }
 
         ads_buffer_sum_read_response_.resize(total_error_block_size + total_data_block_size);
         ads_buffer_sum_read_request_.clear();
+        ads_read_instructions_.clear();  // a reconfigure rebuilds them
 
         size_t current_data_offset = 0;
         size_t current_error_offset = 0;
@@ -146,21 +157,22 @@ namespace beckhoff_ads_hardware_interface
             ADS_ITEM_REQ_HEADER header;
             header.indexGroup = ADSIGRP_SYM_VALBYHND;
             header.indexOffset = layout.ads_handle;
-            header.NumBytesData = layout.plc_element_byte_size * layout.num_elements;
+            header.NumBytesData = layout.byte_size;
             const uint8_t *ptr = reinterpret_cast<const uint8_t *>(&header);
             ads_buffer_sum_read_request_.insert(ads_buffer_sum_read_request_.end(), ptr, ptr + sizeof(ADS_ITEM_REQ_HEADER));
 
             // For interfaces targeting the same PLC symbol
-            for (const auto &[index, interface_name] : layout.ros2_interfaces_)
+            for (const auto &member : layout.members)
             {
                 // Fill the read instruction vector
                 ReadInstruction read_instruction;
                 read_instruction.read_buffer_offset_error_code = layout.offset_in_read_response_error;
-                read_instruction.read_buffer_offset_data = layout.offset_in_read_response_data + index * layout.plc_element_byte_size;
-                read_instruction.plc_type = layout.plc_type;
-                read_instruction.state_interface_name = interface_name;
+                read_instruction.read_buffer_offset_data =
+                    layout.offset_in_read_response_data + member.byte_offset;
+                read_instruction.plc_type = member.plc_type;
+                read_instruction.state_interface_name = member.interface_name;
 
-                // The state interfaces' names are ordered by ascending indexes of the PLC array thanks to layout.ros2_interfaces_ being a map
+                // Ordered by ascending offset inside the PLC symbol, as layout.members is
                 ads_read_instructions_.push_back(read_instruction);
             }
 
@@ -186,10 +198,12 @@ namespace beckhoff_ads_hardware_interface
         size_t total_header_size = num_items_write_ * sizeof(ADS_ITEM_REQ_HEADER);
         for (const auto &layout : ads_item_layouts_write_)
         {
-            total_data_size += layout.plc_element_byte_size * layout.num_elements;
+            total_data_size += layout.byte_size;
         }
 
-        ads_buffer_sum_write_request_.resize(total_header_size + total_data_size);
+        // Zero-filled: bytes of a struct that no interface maps are written as 0.
+        ads_buffer_sum_write_request_.assign(total_header_size + total_data_size, 0);
+        ads_write_instructions_.clear();  // a reconfigure rebuilds them
         ads_buffer_sum_write_response_.resize(num_items_write_ * sizeof(uint32_t));
 
         auto *header_block_ptr = reinterpret_cast<ADS_ITEM_REQ_HEADER *>(ads_buffer_sum_write_request_.data());
@@ -200,27 +214,32 @@ namespace beckhoff_ads_hardware_interface
         {
             header_block_ptr[i].indexGroup = ADSIGRP_SYM_VALBYHND;
             header_block_ptr[i].indexOffset = layout.ads_handle;
-            header_block_ptr[i].NumBytesData = layout.plc_element_byte_size * layout.num_elements;
+            header_block_ptr[i].NumBytesData = layout.byte_size;
 
             layout.offset_in_write_request_data = total_header_size + current_data_offset;
 
             // For interfaces targeting the same PLC symbol
-            for (const auto &[index, interface_name] : layout.ros2_interfaces_)
+            for (const auto &member : layout.members)
             {
                 // Fill the write instruction vector
                 WriteInstruction write_instruction;
-                write_instruction.write_buffer_offset_data = layout.offset_in_write_request_data + index * layout.plc_element_byte_size;
-                write_instruction.plc_type = layout.plc_type;
-                write_instruction.command_interface_name = interface_name;
+                write_instruction.write_buffer_offset_data =
+                    layout.offset_in_write_request_data + member.byte_offset;
+                write_instruction.plc_type = member.plc_type;
+                write_instruction.command_interface_name = member.interface_name;
                 write_instruction.fallback_state_interface_name = "";
+                write_instruction.auto_increment = member.auto_increment;
+                write_instruction.pulse_on_rising_edge = member.pulse_on_rising_edge;
 
-                // There exists a state interface for the same PLC symbol
-                if (!layout.state_command_interfaces_map_.empty())
+                // There exists a state interface for the same PLC value
+                const auto fallback =
+                    layout.state_command_interfaces_map_.find(member.interface_name);
+                if (fallback != layout.state_command_interfaces_map_.end())
                 {
-                    write_instruction.fallback_state_interface_name = layout.state_command_interfaces_map_.find(interface_name)->second;
+                    write_instruction.fallback_state_interface_name = fallback->second;
                 }
 
-                // The command interfaces' names are ordered by ascending indexes of the PLC array thanks to layout.ros2_interfaces_ being a map
+                // Ordered by ascending offset inside the PLC symbol, as layout.members is
                 ads_write_instructions_.push_back(write_instruction);
             }
 
@@ -235,98 +254,117 @@ namespace beckhoff_ads_hardware_interface
 
     void BeckhoffADSHardwareInterface::ads_read_layout_configure()
     {
-        // Count all state interfaces to pre-allocate memory once and avoid reallocations.
-        size_t num_state_interfaces = gpio_state_interfaces_.size() + joint_state_interfaces_.size() + sensor_state_interfaces_.size();
-
-        // Reserve worst-case scenario for layouts (each interface targets a different PLC symbol)
-        ads_item_layouts_read_.clear();
-        ads_item_layouts_read_.reserve(num_state_interfaces);
-
-        // Keep track of multiple interfaces targeting the same PLC symbol of type ARRAY[x], but different index
-        std::map<std::string, bool> processed_plc_symbols;
-
-        auto init_ads_read_layout =
-            [&](const auto &type_state_interfaces_)
+        std::vector<InterfaceSpec> specs;
+        for (const auto *interfaces :
+             {&joint_state_interfaces_, &gpio_state_interfaces_, &sensor_state_interfaces_})
         {
-            for (const auto &[name, descr] : type_state_interfaces_)
+            const auto type_specs = interface_specs(*interfaces, false);
+            specs.insert(specs.end(), type_specs.begin(), type_specs.end());
+        }
+        layouts_from_specs(specs, ads_item_layouts_read_);
+    }
+
+    std::vector<InterfaceSpec> BeckhoffADSHardwareInterface::interface_specs(
+        const std::unordered_map<std::string, hardware_interface::InterfaceDescription> &interfaces,
+        bool command)
+    {
+        std::vector<InterfaceSpec> specs;
+        for (const auto &[name, descr] : interfaces)
+        {
+            const auto &parameters = descr.interface_info.parameters;
+            InterfaceSpec spec;
+            spec.name = name;
+            try
             {
-                std::string plc_symbol;
-                std::string plc_type_str;
-                size_t num_elements = 1;
-                size_t plc_index = 0;
-                try
+                spec.plc_symbol = parameters.at("PLC_symbol");
+                spec.plc_type = plc_type_from_string(parameters.at("PLC_type"));
+                if (parameters.count("n_elements"))
                 {
-                    plc_symbol = descr.interface_info.parameters.at("PLC_symbol");
-                    plc_type_str = descr.interface_info.parameters.at("PLC_type");
-                    if (descr.interface_info.parameters.count("n_elements"))
-                    {
-                        num_elements = std::stoul(descr.interface_info.parameters.at("n_elements"));
-                    }
-                    if (descr.interface_info.parameters.count("index"))
-                    {
-                        plc_index = std::stoul(descr.interface_info.parameters.at("index"));
-                    }
+                    spec.n_elements = std::stoul(parameters.at("n_elements"));
                 }
-                catch (const std::exception &e)
+                if (parameters.count("index"))
                 {
-                    RCLCPP_ERROR(getLogger(), "Error parsing PLC parameters for state interface '%s': %s. Check URDF.",
-                                 name.c_str(), e.what());
-                    continue;
+                    spec.index = std::stoul(parameters.at("index"));
                 }
-
-                // If this is the first time we see this symbol, create the layout
-                if (processed_plc_symbols.find(plc_symbol) == processed_plc_symbols.end())
+                if (parameters.count("byte_offset"))
                 {
-                    ADSDataLayout layout;
-                    layout.plc_name_symbolic = plc_symbol;
-                    layout.num_elements = num_elements;
-                    layout.plc_type = strToPlcType(plc_type_str);
-                    layout.ros2_interfaces_.emplace(std::make_pair(plc_index, name));
-
-                    if (layout.plc_type == PLCType::UNKNOWN || layout.plc_type == PLCType::STRING)
-                    {
-                        RCLCPP_ERROR(getLogger(), "Skipping state variable '%s' due to UNSUPPORTED or UNKNOWN PLC_type '%s'.", layout.plc_name_symbolic.c_str(), plc_type_str.c_str());
-                    }
-                    else
-                    {
-                        layout.plc_element_byte_size = plcTypeByteSize(layout.plc_type);
-                        ads_item_layouts_read_.push_back(std::move(layout));
-                        processed_plc_symbols[plc_symbol] = true;
-                    }
-                }
-                // The symbol already exists
-                else
-                {
-                    // Find the ADS Data Layout object of the corresponding PLC symbol
-                    auto it = std::find_if(ads_item_layouts_read_.begin(), ads_item_layouts_read_.end(),
-                                           [&plc_symbol](const ADSDataLayout &layout)
-                                           { return layout.plc_name_symbolic == plc_symbol; });
-
-                    // Add the interface name the layout
-                    (*it).ros2_interfaces_.emplace(std::make_pair(plc_index, name));
+                    spec.byte_offset = std::stoul(parameters.at("byte_offset"));
                 }
             }
-        };
+            catch (const std::exception &e)
+            {
+                RCLCPP_ERROR(getLogger(),
+                             "Error parsing PLC parameters for %s interface '%s': %s. Check URDF.",
+                             command ? "command" : "state", name.c_str(), e.what());
+                continue;
+            }
+            // Command-only boolean flags.
+            bool valid = true;
+            for (const auto &[flag_name, field] :
+                 {std::pair<const char *, bool *>{"auto_increment", &spec.auto_increment},
+                  std::pair<const char *, bool *>{"pulse_on_rising_edge",
+                                                  &spec.pulse_on_rising_edge}})
+            {
+                if (!parameters.count(flag_name))
+                {
+                    continue;
+                }
+                std::string flag = parameters.at(flag_name);
+                std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
+                if (!command)
+                {
+                    RCLCPP_WARN(getLogger(),
+                                "Ignoring '%s' on state interface '%s': only a command is written.",
+                                flag_name, name.c_str());
+                }
+                else if (flag == "true" || flag == "1")
+                {
+                    *field = true;
+                }
+                else if (flag != "false" && flag != "0")
+                {
+                    RCLCPP_ERROR(getLogger(),
+                                 "Invalid '%s' ('%s') for command interface '%s'; expected true or "
+                                 "false. Skipping it.",
+                                 flag_name, parameters.at(flag_name).c_str(), name.c_str());
+                    valid = false;
+                }
+            }
+            if (valid)
+            {
+                specs.push_back(spec);
+            }
+        }
+        return specs;
+    }
 
-        init_ads_read_layout(joint_state_interfaces_);
-        init_ads_read_layout(gpio_state_interfaces_);
-        init_ads_read_layout(sensor_state_interfaces_);
+    void BeckhoffADSHardwareInterface::layouts_from_specs(const std::vector<InterfaceSpec> &specs,
+                                                          std::vector<ADSDataLayout> &layouts)
+    {
+        std::vector<std::string> errors;
+        const auto items = group_items(specs, errors);
+        for (const auto &error : errors)
+        {
+            RCLCPP_ERROR(getLogger(), "Skipping an interface: %s", error.c_str());
+        }
+
+        layouts.clear();
+        layouts.reserve(items.size());
+        for (const auto &item : items)
+        {
+            ADSDataLayout layout;
+            layout.plc_name_symbolic = item.plc_symbol;
+            layout.byte_size = item.byte_size;
+            layout.members = item.members;
+            layouts.push_back(std::move(layout));
+        }
     }
 
     void BeckhoffADSHardwareInterface::ads_write_layout_configure()
     {
-        // Count all command interfaces to pre-allocate memory once and avoid reallocations.
-        size_t num_command_interfaces = joint_command_interfaces_.size() + gpio_command_interfaces_.size();
-
-        // Reserve worst-case scenario for layouts (each interface targets a different PLC symbol)
-        ads_item_layouts_write_.clear();
-        ads_item_layouts_write_.reserve(num_command_interfaces);
         // Rebuilt from the URDF below; a stale entry would drive a value for an interface this
         // configure no longer declares.
         ads_shutdown_values_.clear();
-
-        // Keep track of multiple interfaces targeting the same PLC symbol of type ARRAY[x], but different index
-        std::map<std::string, bool> processed_plc_symbols;
 
         auto init_ads_write_layout =
             [&](const auto &type_command_interfaces_)
@@ -372,66 +410,16 @@ namespace beckhoff_ads_hardware_interface
                             ex.what());
                     }
                 }
-
-                std::string plc_symbol;
-                std::string plc_type_str;
-                size_t num_elements = 1;
-                size_t plc_index = 0;
-                try
-                {
-                    plc_symbol = descr.interface_info.parameters.at("PLC_symbol");
-                    plc_type_str = descr.interface_info.parameters.at("PLC_type");
-                    if (descr.interface_info.parameters.count("n_elements"))
-                    {
-                        num_elements = std::stoul(descr.interface_info.parameters.at("n_elements"));
-                    }
-                    if (descr.interface_info.parameters.count("index"))
-                    {
-                        plc_index = std::stoul(descr.interface_info.parameters.at("index"));
-                    }
-                }
-                catch (const std::exception &e)
-                {
-                    RCLCPP_ERROR(getLogger(), "Error parsing PLC parameters for command interface '%s': %s. Check URDF.",
-                                 name.c_str(), e.what());
-                    continue;
-                }
-
-                if (processed_plc_symbols.find(plc_symbol) == processed_plc_symbols.end())
-                {
-                    ADSDataLayout layout;
-                    layout.plc_name_symbolic = plc_symbol;
-                    layout.num_elements = num_elements;
-                    layout.plc_type = strToPlcType(plc_type_str);
-                    layout.ros2_interfaces_.emplace(std::make_pair(plc_index, name));
-
-                    if (layout.plc_type == PLCType::UNKNOWN || layout.plc_type == PLCType::STRING)
-                    {
-                        RCLCPP_ERROR(getLogger(), "Skipping command variable '%s' due to UNSUPPORTED or UNKNOWN PLC_type '%s'.", layout.plc_name_symbolic.c_str(), plc_type_str.c_str());
-                    }
-                    else
-                    {
-                        layout.plc_element_byte_size = plcTypeByteSize(layout.plc_type);
-                        ads_item_layouts_write_.push_back(std::move(layout));
-                        processed_plc_symbols[plc_symbol] = true;
-                    }
-                }
-                // The symbol already exists
-                else
-                {
-                    // Look for the ADS Data Layout of the corresponding PLC symbol
-                    auto it = std::find_if(ads_item_layouts_write_.begin(), ads_item_layouts_write_.end(),
-                                           [&plc_symbol](const ADSDataLayout &layout)
-                                           { return layout.plc_name_symbolic == plc_symbol; });
-
-                    // Add the command interface name the layout
-                    (*it).ros2_interfaces_.emplace(std::make_pair(plc_index, name));
-                }
             }
         };
 
         init_ads_write_layout(joint_command_interfaces_);
         init_ads_write_layout(gpio_command_interfaces_);
+
+        std::vector<InterfaceSpec> specs = interface_specs(joint_command_interfaces_, true);
+        const auto gpio_specs = interface_specs(gpio_command_interfaces_, true);
+        specs.insert(specs.end(), gpio_specs.begin(), gpio_specs.end());
+        layouts_from_specs(specs, ads_item_layouts_write_);
     }
 
     hardware_interface::CallbackReturn BeckhoffADSHardwareInterface::on_activate(
@@ -531,87 +519,17 @@ namespace beckhoff_ads_hardware_interface
             // Each state interface has its corresponding read_instruction
             const uint8_t *ptr_plc_element_current = ads_buffer_sum_read_response_.data() + read_instruction.read_buffer_offset_data;
 
-            // TODO: performance - Hoist the switch/case above for loop?
-
-            switch (read_instruction.plc_type)
+            double val;
+            if (!decode_plc_value(read_instruction.plc_type, ptr_plc_element_current, val))
             {
-            case PLCType::LREAL:
-            {
-                double val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, val);
-                break;
-            }
-            case PLCType::REAL:
-            {
-                float val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, static_cast<double>(val));
-                break;
-            }
-            case PLCType::BOOL:
-            {
-                uint8_t byte_val;
-                memcpy(&byte_val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, (byte_val != 0) ? 1.0 : 0.0);
-                break;
-            }
-            case PLCType::SINT:
-            {
-                int8_t val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, static_cast<double>(val));
-                break;
-            }
-            case PLCType::USINT:
-            case PLCType::BYTE:
-            {
-                uint8_t val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, static_cast<double>(val));
-                break;
-            }
-            case PLCType::INT:
-            {
-                int16_t val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, static_cast<double>(val));
-                break;
-            }
-            case PLCType::UINT:
-            {
-                uint16_t val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, static_cast<double>(val));
-                break;
-            }
-            case PLCType::DINT:
-            {
-                int32_t val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, static_cast<double>(val));
-                break;
-            }
-            case PLCType::UDINT:
-            {
-                uint32_t val;
-                memcpy(&val, ptr_plc_element_current, plcTypeByteSize(read_instruction.plc_type));
-                set_state(read_instruction.state_interface_name, static_cast<double>(val));
-                break;
-            }
-            /* Not supported for now, guarded against in on_configure()
-            case PLCType::STRING:
-                break;
-            */
-            case PLCType::UNKNOWN:
-            default:
                 RCLCPP_ERROR_THROTTLE(getLogger(), *logging_throttle_clock_, 1000,
                                       "Unhandled or UNKNOWN PLC type (%d) for the interface '%s' during read.",
                                       static_cast<int>(read_instruction.plc_type), read_instruction.state_interface_name.c_str());
                 set_state(read_instruction.state_interface_name, std::numeric_limits<double>::quiet_NaN());
                 any_item_read_failed = true;
-                break;
+                continue;
             }
+            set_state(read_instruction.state_interface_name, val);
         }
         return any_item_read_failed ? hardware_interface::return_type::ERROR : hardware_interface::return_type::OK;
     }
@@ -624,11 +542,38 @@ namespace beckhoff_ads_hardware_interface
             return hardware_interface::return_type::OK;
         }
 
-        for (const auto &write_instruction : ads_write_instructions_)
+        for (auto &write_instruction : ads_write_instructions_)
         {
             uint8_t *ptr_write_buffer_destination_current = ads_buffer_sum_write_request_.data() + write_instruction.write_buffer_offset_data;
 
-            // TODO: performance - Hoist the switch/case above for loop?
+            if (write_instruction.auto_increment)
+            {
+                // A counter the component owns: one more every write, whatever the command says,
+                // so the PLC sees each sample of the item as new.
+                write_instruction.counter_value =
+                    next_counter_value(write_instruction.counter_value, write_instruction.plc_type);
+                encode_plc_value(write_instruction.plc_type, write_instruction.counter_value,
+                                 ptr_write_buffer_destination_current);
+                continue;
+            }
+
+            if (write_instruction.pulse_on_rising_edge)
+            {
+                // Only a CHANGE of the command reaches the PLC as a 1, for this one write: a held
+                // command (the gpio controller rewrites its last one every cycle) is no proof that
+                // its sender is still alive, an edge is.
+                const double command = get_command(write_instruction.command_interface_name);
+                set_command(write_instruction.command_interface_name,
+                            std::numeric_limits<double>::quiet_NaN());
+                const bool pulse = rising_edge(write_instruction.last_command, command);
+                if (!std::isnan(command))
+                {
+                    write_instruction.last_command = command;
+                }
+                encode_plc_value(write_instruction.plc_type, pulse ? 1.0 : 0.0,
+                                 ptr_write_buffer_destination_current);
+                continue;
+            }
 
             // store the current val and reset the ros-side command value
             double val = get_command(write_instruction.command_interface_name);
@@ -650,73 +595,14 @@ namespace beckhoff_ads_hardware_interface
                 }
             }
 
-            switch (write_instruction.plc_type)
+            if (!encode_plc_value(write_instruction.plc_type, val,
+                                  ptr_write_buffer_destination_current))
             {
-            case PLCType::LREAL:
-            {
-                // val is already double (LREAL is 8 bytes - 64 bit)
-                memcpy(ptr_write_buffer_destination_current, &val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::REAL:
-            {
-                float plc_val = static_cast<float>(val);
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::BOOL:
-            {
-                // bool is size of byte in PLC
-                uint8_t plc_val = (val != 0.0) ? 1 : 0;
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::SINT:
-            {
-                int8_t plc_val = static_cast<int8_t>(std::round(val));
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::USINT:
-            case PLCType::BYTE:
-            {
-                uint8_t plc_val = static_cast<uint8_t>(std::round(val));
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::INT:
-            {
-                int16_t plc_val = static_cast<int16_t>(std::round(val));
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::UINT:
-            {
-                uint16_t plc_val = static_cast<uint16_t>(std::round(val));
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::DINT:
-            {
-                int32_t plc_val = static_cast<int32_t>(std::round(val));
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            case PLCType::UDINT:
-            {
-                uint32_t plc_val = static_cast<uint32_t>(std::round(val));
-                memcpy(ptr_write_buffer_destination_current, &plc_val, plcTypeByteSize(write_instruction.plc_type));
-                break;
-            }
-            /* String not supported for now
-            case PLCType::STRING: break;
-            */
-            case PLCType::UNKNOWN:
-            default:
-                RCLCPP_FATAL(getLogger(), "UNKNOWN PLC type (%d) for the interface '%s' during write. Sending zeroed data of size %zu.",
-                             static_cast<int>(write_instruction.plc_type), write_instruction.command_interface_name.c_str(), plcTypeByteSize(write_instruction.plc_type));
+                RCLCPP_FATAL(getLogger(),
+                             "UNKNOWN PLC type (%d) for the interface '%s' during write.",
+                             static_cast<int>(write_instruction.plc_type),
+                             write_instruction.command_interface_name.c_str());
                 return hardware_interface::return_type::ERROR;
-                break;
             }
         }
 
@@ -845,71 +731,6 @@ namespace beckhoff_ads_hardware_interface
 
         return true;
     }
-
-    PLCType BeckhoffADSHardwareInterface::strToPlcType(const std::string &type_str_param)
-    {
-        std::string type_str = type_str_param;
-        std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
-
-        if (type_str == "LREAL")
-            return PLCType::LREAL;
-        if (type_str == "REAL")
-            return PLCType::REAL;
-        if (type_str == "BOOL")
-            return PLCType::BOOL;
-        if (type_str == "UDINT")
-            return PLCType::UDINT;
-        if (type_str == "DINT")
-            return PLCType::DINT;
-        if (type_str == "UINT")
-            return PLCType::UINT;
-        if (type_str == "INT")
-            return PLCType::INT;
-        if (type_str == "USINT")
-            return PLCType::USINT;
-        if (type_str == "SINT")
-            return PLCType::SINT;
-        if (type_str == "BYTE")
-            return PLCType::BYTE;
-        if (type_str == "STRING")
-            return PLCType::STRING;
-
-        RCLCPP_ERROR(getLogger(), "Unknown PLC type string: '%s'", type_str_param.c_str());
-        return PLCType::UNKNOWN;
-    }
-
-    size_t BeckhoffADSHardwareInterface::plcTypeByteSize(PLCType plc_type_enum)
-    {
-        switch (plc_type_enum)
-        {
-        case PLCType::LREAL:
-            return 8;
-        case PLCType::REAL:
-            return 4;
-        case PLCType::BOOL:
-            return 1;
-        case PLCType::UDINT:
-            return 4;
-        case PLCType::DINT:
-            return 4;
-        case PLCType::UINT:
-            return 2;
-        case PLCType::INT:
-            return 2;
-        case PLCType::USINT:
-            return 1;
-        case PLCType::SINT:
-            return 1;
-        case PLCType::BYTE:
-            return 1;
-        // case PLCType::STRING: not currently supported
-        case PLCType::UNKNOWN:
-        default:
-            RCLCPP_ERROR(getLogger(), "Cannot get byte size for UNKNOWN or unhandled PLC type enum value: %d", static_cast<int>(plc_type_enum));
-            return 0;
-        }
-    }
-
 } // namespace beckhoff_ads_hardware_interface
 
 #include "pluginlib/class_list_macros.hpp"

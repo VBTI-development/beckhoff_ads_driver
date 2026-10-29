@@ -16,6 +16,7 @@
 #include <vector>
 #include <limits>
 #include <optional>
+#include <unordered_map>
 
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/handle.hpp"
@@ -26,52 +27,43 @@
 
 #include "ads/AdsLib.h"
 #include "ads/AdsDevice.h"
+#include "beckhoff_ads_hardware_interface/ads_layout.hpp"
+
 namespace beckhoff_ads_hardware_interface
 {
 
-  enum class PLCType
-  {
-    // Using enum instead of raw strings for faster iterations in read/write
-    UNKNOWN,
-    BOOL,
-    LREAL,
-    REAL,
-    UDINT,
-    DINT,
-    INT,
-    UINT,
-    SINT,
-    USINT,
-    BYTE,
-    STRING,
-  };
+    // Describes each PLC item (single variable, array or struct) for polling via sum commands.
+    struct ADSDataLayout
+    {
+        // Configured from yaml
+        std::string plc_name_symbolic;  // e.g., "MAIN.Joint_Pos_State". Used to get the handle.
+        std::optional<AdsHandle> ads_handle_ref;  // Keep handle alive; destructor releases it.
+        uint32_t ads_handle;  // PLC Handle for the symbolic name. Not using AdsHandle, as we don't
+                              // need a shared ptr, just a value to paste in the message
 
-  // Describes each PLC item (array or single variable) for polling via sum commands.
-  struct ADSDataLayout
-  {
-    // Configured from yaml
-    std::string plc_name_symbolic; // e.g., "MAIN.Joint_Pos_State". Used to get the handle.
-    PLCType plc_type;
-    std::optional<AdsHandle> ads_handle_ref; // Keep handle alive; destructor releases it.
-    uint32_t ads_handle; // PLC Handle for the symbolic name. Not using AdsHandle, as we don't need a shared ptr, just a value to paste in the message
+        size_t byte_size;  // bytes read/written for this item: 48 for LREAL[6], 28 for a packed
+                           // {UDINT, 3x LREAL}.
 
-    size_t num_elements;          // 6 for LREAL[6], 1 for single LREAL/BOOL etc.
-    size_t plc_element_byte_size; // byte size of ONE element on PLC (e.g., 8 for LREAL, 1 for BOOL).
+        // If we have an identically named command and state interface, in case there are no new
+        // commands to be sent to the robot, we want to use the value read in the state interface
+        // for the next request. for mapping the ros2 state interfaces names to the corresponding
+        // command interfaces names <command_interface_name, state_interface_name>
+        std::map<std::string, std::string> state_command_interfaces_map_;
 
-    // If we have an identically named command and state interface, in case there are no new commands to be sent to the robot, we want to use the value read in the state interface for the next request.
-    // for mapping the ros2 state interfaces names to the corresponding command interfaces names <command_interface_name, state_interface_name>
-    std::map<std::string, std::string> state_command_interfaces_map_;
+        // for unpacking sum read response  [Err1_ULONG,...,ErrN_ULONG |
+        // Data1_bytes,...,DataN_bytes]
+        size_t offset_in_read_response_error;  // Byte offset where this item's ULONG error code
+                                               // starts.
+        size_t offset_in_read_response_data;   // Byte offset where this item's data starts.
 
-    // for unpacking sum read response  [Err1_ULONG,...,ErrN_ULONG | Data1_bytes,...,DataN_bytes]
-    size_t offset_in_read_response_error; // Byte offset where this item's ULONG error code starts.
-    size_t offset_in_read_response_data;  // Byte offset where this item's data starts.
+        // for packing sum write response [ADS_ITEM_REQ_HEADER_1,...,ADS_ITEM_REQ_HEADER_N |
+        // Data1_bytes,...,DataN_bytes]
+        size_t offset_in_write_request_data;  // Byte offset where this item's data starts.
 
-    // for packing sum write response [ADS_ITEM_REQ_HEADER_1,...,ADS_ITEM_REQ_HEADER_N | Data1_bytes,...,DataN_bytes]
-    size_t offset_in_write_request_data; // Byte offset where this item's data starts.
-
-    // For interfaces targeting the same PLC symbol, store all their names with their corresponding index inside a map. This will be useful when calling thr ROS2 set_state and set_command functions.
-    std::map<size_t, std::string> ros2_interfaces_;
-  };
+        // The interfaces targeting this PLC symbol, each at its byte offset inside the item (array
+        // index x element size, or a struct member's byte_offset), ordered by that offset.
+        std::vector<ItemMember> members;
+    };
 
   // Packed header for sum read/write request item headers
   typedef struct
@@ -95,6 +87,16 @@ namespace beckhoff_ads_hardware_interface
     PLCType plc_type;
     std::string command_interface_name;
     std::string fallback_state_interface_name; // The state interface name corresponding to the current command interface name
+
+    // auto_increment: the component writes a counter here instead of the command, one more every
+    // write(), so the PLC can tell a fresh sample from a repeated one.
+    bool auto_increment = false;
+    double counter_value =
+        std::numeric_limits<double>::quiet_NaN();  // last value written; NaN before the first
+
+    // pulse_on_rising_edge: 1 for the one write in which the command rose 0 -> 1, else 0.
+    bool pulse_on_rising_edge = false;
+    double last_command = std::numeric_limits<double>::quiet_NaN();  // NaN before the first
   };
 
   class BeckhoffADSHardwareInterface : public hardware_interface::SystemInterface
@@ -126,9 +128,14 @@ namespace beckhoff_ads_hardware_interface
 
     // ========= PLC ==============================
 
-    // PLC Type and Size Helpers
-    PLCType strToPlcType(const std::string &type_str);
-    size_t plcTypeByteSize(PLCType type_enum);
+    /// The ADS item specs of a set of interfaces, from their URDF parameters. Interfaces whose
+    /// parameters cannot be parsed are reported and left out. `command` enables auto_increment.
+    std::vector<InterfaceSpec> interface_specs(
+        const std::unordered_map<std::string, hardware_interface::InterfaceDescription> &interfaces,
+        bool command);
+    /// Turns item specs into layouts, reporting every interface group_items() rejected.
+    void layouts_from_specs(const std::vector<InterfaceSpec> &specs,
+                            std::vector<ADSDataLayout> &layouts);
 
     // ADS Communication objects
     std::unique_ptr<AdsDevice> ads_device_; // Manages the route/connection to the PLC
@@ -179,4 +186,4 @@ namespace beckhoff_ads_hardware_interface
 
 } // namespace beckhoff_ads_hardware_interface
 
-#endif // beckhoff_ads_hardware_interface__BECKHOFF_SYSTEM_HPP_
+#endif  // beckhoff_ads_hardware_interface__BECKHOFF_SYSTEM_HPP_

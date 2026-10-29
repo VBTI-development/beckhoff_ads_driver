@@ -45,7 +45,41 @@ For each `<state_interface>` and `<command_interface>`, you must provide paramet
 | `PLC_type`      | `string`  | The data type of the PLC variable (e.g., "LREAL", "BOOL", "DINT"). Case-insensitive. |
 | `n_elements`    | `integer` | (Optional) The number of elements if the symbol is an array. Defaults to 1. |
 | `index`         | `integer` | (Optional) The index within the PLC array that this interface corresponds to. Defaults to 0. |
+| `byte_offset`   | `integer` | (Optional) The byte offset of this interface inside a PLC struct. See [Structs](#structs). Cannot be combined with `index` on the same `PLC_symbol`. |
 | `initial_value` | `double`  | (Optional, Command Only) The initial value for a command interface before the first command is received. |
+| `auto_increment`| `bool`    | (Optional, Command Only) The component writes a counter instead of the command: one more on every write, wrapping to 0 past the type's maximum, starting at 1. Needs an unsigned integer `PLC_type` (`USINT`, `BYTE`, `UINT`, `UDINT`). |
+| `pulse_on_rising_edge` | `bool` | (Optional, Command Only, `BOOL`) The PLC symbol is written 1 for the one write in which the command rises from 0 to 1, and 0 otherwise. A held command (a gpio controller rewrites its last command every cycle) never keeps the symbol at 1, so a heartbeat toggled by a node stops reaching the PLC when that node, the controller or this component stops. |
+
+### Structs
+All interfaces that name the same `PLC_symbol` are read or written as **one item** of the ADS sum
+command, so the PLC never sees some of them updated and others not within one cycle. Address the
+members of a struct with `byte_offset` and give each its own `PLC_type`. The item covers the symbol
+from byte 0 up to the end of the last member; bytes between members that no interface maps are
+written as 0, so map every member of a struct you write. The offsets are those of the struct's
+packed layout on the PLC, so declare the struct with `{attribute 'pack_mode' := '1'}` (or work out
+the padding of its pack mode).
+
+A typical use is a cyclic setpoint with a sequence counter, so the PLC can tell a fresh sample from
+a repeated one:
+
+```xml
+<!-- TYPE ST_AxisStream : STRUCT Counter : UDINT; Position, Velocity, Acceleration : LREAL; END_STRUCT -->
+<command_interface name="feed_counter">
+  <param name="PLC_symbol">MAIN.FeedIf</param>
+  <param name="PLC_type">UDINT</param>
+  <param name="byte_offset">0</param>
+  <param name="auto_increment">true</param>
+</command_interface>
+<command_interface name="feed_position">
+  <param name="PLC_symbol">MAIN.FeedIf</param>
+  <param name="PLC_type">LREAL</param>
+  <param name="byte_offset">4</param>
+</command_interface>
+<!-- feed_velocity at byte_offset 12, feed_acceleration at 20 -->
+```
+
+A command member that receives no new command keeps its last written value, as any other command
+interface does, so the struct is always written whole.
 
 ### Supported PLC Types
 The following PLC data types are supported and are automatically converted to and from `double` values.
@@ -121,13 +155,13 @@ For troubleshooting network connection with TwinCAT 3 XAE, refer to [the documen
 
 *Please note that the two following issues were encountered while running the TwinCAT 3 XAE example project on a Windows Virtual Machine.*
 
-### TwinCAT 3 XAE Crash on Windows 11 VM 
-The issue occurs when switching off `Run Mode` inside `TwinCAT 3 XAE`. `TwinCAT`crashes afterwards and reboots the VM.   
-The core isolation was responsible for the bug. Isolated cores can be removed from the project's `Real time Settings`. 
+### TwinCAT 3 XAE Crash on Windows 11 VM
+The issue occurs when switching off `Run Mode` inside `TwinCAT 3 XAE`. `TwinCAT`crashes afterwards and reboots the VM.
+The core isolation was responsible for the bug. Isolated cores can be removed from the project's `Real time Settings`.
 
-### ADS Connection Failure 
-The ADS connection may be [refused](https://epics.cosylab.com/documentation/adsDriver/troubleshooting/index.html#ioc-fails-to-connect-with-read-frame-failed-with-error-connection-reset-by-peer-errors) even though both the PLC and the host machine can ping each other.   
-The ADS router does not seem to recognize the physical IP address of the host. The host-side **virtual IP address** should be the one used instead for the route in `TwinCAT 3 XAE` and inside the `URDF`.    
+### ADS Connection Failure
+The ADS connection may be [refused](https://epics.cosylab.com/documentation/adsDriver/troubleshooting/index.html#ioc-fails-to-connect-with-read-frame-failed-with-error-connection-reset-by-peer-errors) even though both the PLC and the host machine can ping each other.
+The ADS router does not seem to recognize the physical IP address of the host. The host-side **virtual IP address** should be the one used instead for the route in `TwinCAT 3 XAE` and inside the `URDF`.
 In our case for example, it corresponds to the interface `virbr0`.
 
 
