@@ -56,6 +56,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_ads_layout test/test_ads_layout.cpp)
   target_link_libraries(test_ads_layout beckhoff_ads_hardware_interface)
+  ament_add_gtest(test_sigpipe test/test_sigpipe.cpp)
+  target_link_libraries(test_sigpipe beckhoff_ads_hardware_interface)
 endif()
 
 ament_export_include_directories(
