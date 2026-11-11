@@ -9,6 +9,7 @@
 // Author: Nikola Banovic
 // Contributor: Hajar Bartakh
 
+#include <csignal>
 #include <limits>
 #include <vector>
 #include <cstdint>
@@ -24,6 +25,16 @@ namespace beckhoff_ads_hardware_interface
     hardware_interface::CallbackReturn BeckhoffADSHardwareInterface::on_init(
         const hardware_interface::HardwareComponentInterfaceParams &params)
     {
+        // A send to a PLC that went away must fail, not raise SIGPIPE: the default action kills
+        // the process, and under ros2_control that is the controller_manager with every other
+        // hardware component and controller in it (2026-11-11, exit code -13 right after an ADS
+        // read timeout). The ADS library is a vendor binary whose sends cannot be given
+        // MSG_NOSIGNAL, so the signal is ignored for the whole process; the send then returns
+        // EPIPE and the library reports it as the ADS error it already handles.
+#ifndef _WIN32
+        std::signal(SIGPIPE, SIG_IGN);
+#endif
+
         if (hardware_interface::SystemInterface::on_init(params) != CallbackReturn::SUCCESS)
         {
             return CallbackReturn::ERROR;
