@@ -149,6 +149,16 @@ namespace beckhoff_ads_hardware_interface
     /// reset or replaced. Idempotent: safe when the layouts are already empty.
     void release_ads_handles();
 
+    /// Release the handles, drop the device and close the TCP connection to the PLC.
+    ///
+    /// AdsLib keeps one connection per PLC address for the whole process, and a new AdsDevice
+    /// reuses it. After the PLC restarts that connection is dead without the process noticing, so
+    /// every later request waits out the ADS timeout (error 1861) until ros2_control_node itself
+    /// restarts (2026-11-13). Deleting the route closes the connection, and the next AdsDevice
+    /// opens a fresh one. Bounded even over a dead connection: the handles are released with
+    /// HANDLE_RELEASE_TIMEOUT_MS instead of the device's timeout.
+    void drop_plc_connection();
+
     /// Command interface name -> the value to drive onto the PLC when the component deactivates.
     ///
     /// Declared per command interface as <param name="shutdown_value">, mirroring initial_value.
