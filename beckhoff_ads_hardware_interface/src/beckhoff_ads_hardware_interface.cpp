@@ -10,6 +10,7 @@
 // Contributor: Hajar Bartakh
 
 #include <csignal>
+#include <cstdio>
 #include <limits>
 #include <vector>
 #include <cstdint>
@@ -22,6 +23,22 @@
 
 namespace beckhoff_ads_hardware_interface
 {
+    namespace
+    {
+        /// How long releasing one symbol handle may take while dropping the PLC connection. A PLC
+        /// that is there answers within milliseconds and so keeps no handle behind; over a dead
+        /// connection each release otherwise waits out the device's 5 s timeout, which held
+        /// controller_manager for 100 s on 2026-11-13.
+        constexpr uint32_t HANDLE_RELEASE_TIMEOUT_MS = 200;
+
+        bool parse_ams_net_id(const std::string &text, AmsNetId &net_id)
+        {
+            return sscanf(text.c_str(), "%hhu.%hhu.%hhu.%hhu.%hhu.%hhu",
+                          &net_id.b[0], &net_id.b[1], &net_id.b[2],
+                          &net_id.b[3], &net_id.b[4], &net_id.b[5]) == 6;
+        }
+    } // namespace
+
     hardware_interface::CallbackReturn BeckhoffADSHardwareInterface::on_init(
         const hardware_interface::HardwareComponentInterfaceParams &params)
     {
@@ -51,8 +68,10 @@ namespace beckhoff_ads_hardware_interface
         // Before anything else: configure_ads_device() below REPLACES ads_device_, which destroys
         // the previous one. A handle left over from an earlier configure would then be released
         // against a freed device -- the same fault as on_shutdown. The layout vectors are cleared
-        // again further down as part of building them; this is about WHEN, not whether.
-        release_ads_handles();
+        // again further down as part of building them; this is about WHEN, not whether. And every
+        // configure starts from a fresh TCP connection: after a PLC restart the old one is dead,
+        // and a device that reused it never got an answer again (2026-11-13).
+        drop_plc_connection();
 
         // Configure ADS Client Device
         if (!configure_ads_device())
@@ -662,15 +681,13 @@ namespace beckhoff_ads_hardware_interface
         const rclcpp_lifecycle::State & /*previous_state*/)
     {
         RCLCPP_INFO(getLogger(), "Releasing ADS resources...");
-        // Handles first, device second. The other order leaves every optional<AdsHandle> in the
-        // layout vectors holding a deleter bound to a freed AdsDevice; they then run at component
-        // destruction, inside ~ResourceManager, and segfault in DeleteSymbolHandle -> WriteReqEx
-        // -> GetLocalPort() on a dangling this.
-        release_ads_handles();
-        if (ads_device_)
-        {
-            ads_device_.reset();
-        }
+        // Handles first, device second (inside drop_plc_connection()). The other order leaves every
+        // optional<AdsHandle> in the layout vectors holding a deleter bound to a freed AdsDevice;
+        // they then run at component destruction, inside ~ResourceManager, and segfault in
+        // DeleteSymbolHandle -> WriteReqEx -> GetLocalPort() on a dangling this. With a PLC that went
+        // away, releasing at the device's own timeout kept ros2_control_node from exiting until the
+        // launch killed it (2026-11-13).
+        drop_plc_connection();
         RCLCPP_INFO(getLogger(), "ADS resources released.");
 
         return hardware_interface::CallbackReturn::SUCCESS;
@@ -682,6 +699,23 @@ namespace beckhoff_ads_hardware_interface
         // optional<AdsHandle> runs the deleter that issues DeleteSymbolHandle on the PLC.
         ads_item_layouts_read_.clear();
         ads_item_layouts_write_.clear();
+    }
+
+    void BeckhoffADSHardwareInterface::drop_plc_connection()
+    {
+        if (ads_device_)
+        {
+            ads_device_->SetTimeout(HANDLE_RELEASE_TIMEOUT_MS);
+        }
+        release_ads_handles();
+        ads_device_.reset();
+
+        const auto net_id = info_.hardware_parameters.find("plc_ams_net_id");
+        AmsNetId plc_net_id;
+        if (net_id != info_.hardware_parameters.end() && parse_ams_net_id(net_id->second, plc_net_id))
+        {
+            bhf::ads::DelLocalRoute(plc_net_id);
+        }
     }
 
     bool BeckhoffADSHardwareInterface::configure_ads_device()
@@ -696,18 +730,14 @@ namespace beckhoff_ads_hardware_interface
             uint16_t plc_ams_port = std::stoul(params.at("plc_ams_port"));
 
             AmsNetId remote_net_id;
-            if (sscanf(plc_ams_net_id_str.c_str(), "%hhu.%hhu.%hhu.%hhu.%hhu.%hhu",
-                       &remote_net_id.b[0], &remote_net_id.b[1], &remote_net_id.b[2],
-                       &remote_net_id.b[3], &remote_net_id.b[4], &remote_net_id.b[5]) != 6)
+            if (!parse_ams_net_id(plc_ams_net_id_str, remote_net_id))
             {
                 RCLCPP_FATAL(getLogger(), "\tInvalid format for 'plc_ams_net_id'. Expected 'x.x.x.x.x.x'.");
                 return false;
             }
 
             AmsNetId local_net_id;
-            if (sscanf(local_ams_net_id_str.c_str(), "%hhu.%hhu.%hhu.%hhu.%hhu.%hhu",
-                       &local_net_id.b[0], &local_net_id.b[1], &local_net_id.b[2],
-                       &local_net_id.b[3], &local_net_id.b[4], &local_net_id.b[5]) != 6)
+            if (!parse_ams_net_id(local_ams_net_id_str, local_net_id))
             {
                 RCLCPP_FATAL(getLogger(), "\tInvalid format for 'local_ams_net_id'. Expected 'x.x.x.x.x.x'.");
                 return false;
